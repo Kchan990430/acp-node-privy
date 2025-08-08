@@ -57,6 +57,7 @@ class AcpClient {
     this.onNewTask = options.onNewTask;
     this.onEvaluate = options.onEvaluate || this.defaultOnEvaluate;
 
+    // Keep original URL for WebSocket, we'll handle API calls differently
     this.acpUrl = this.acpContractClient.config.acpUrl;
     this.init();
   }
@@ -65,7 +66,21 @@ class AcpClient {
     await job.evaluate(true, "Evaluated by default");
   }
 
+  private getApiUrl(): string {
+    // Use proxy in browser environment to avoid CORS
+    if (typeof window !== 'undefined') {
+      return '/api/acp-proxy/api';
+    }
+    return this.acpUrl;
+  }
+
   async init() {
+    // Skip Socket.IO initialization in browser to avoid CORS issues
+    if (typeof window !== 'undefined') {
+      // Skipping Socket.IO initialization in browser environment
+      return;
+    }
+    
     const socket = io(this.acpUrl, {
       auth: {
         walletAddress: this.acpContractClient.walletAddress,
@@ -81,7 +96,6 @@ class AcpClient {
     });
 
     socket.on(SocketEvents.ROOM_JOINED, (_, callback) => {
-      console.log("Joined ACP Room");
       callback(true);
     });
 
@@ -166,7 +180,7 @@ class AcpClient {
     let { cluster, sort_by, top_k, graduationStatus, onlineStatus } = options;
     top_k = top_k ?? 5;
 
-    let url = `${this.acpUrl}/api/agents/v2/search?search=${keyword}`;
+    let url = `${this.getApiUrl()}/api/agents/search?search=${keyword}`;
 
     if (sort_by && sort_by.length > 0) {
       url += `&sortBy=${sort_by.map((s) => s).join(",")}`;
@@ -192,10 +206,18 @@ class AcpClient {
       url += `&onlineStatus=${onlineStatus}`;
     }
 
+    console.log('🔍 Fetching agents from URL:', url);
     const response = await fetch(url);
     const data: {
       data: AcpAgent[];
     } = await response.json();
+
+    console.log('📡 API Response:', JSON.stringify(data, null, 2));
+
+    if (!data || !data.data) {
+      console.error('❌ Invalid API response: data or data.data is null');
+      return [];
+    }
 
     return data.data.map((agent) => {
       return {
@@ -395,7 +417,7 @@ class AcpClient {
   }
 
   async getActiveJobs(page: number = 1, pageSize: number = 10) {
-    let url = `${this.acpUrl}/api/jobs/active?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
+    let url = `${this.getApiUrl()}/jobs/active?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
 
     try {
       const response = await fetch(url, {
@@ -438,7 +460,7 @@ class AcpClient {
   }
 
   async getCompletedJobs(page: number = 1, pageSize: number = 10) {
-    let url = `${this.acpUrl}/api/jobs/completed?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
+    let url = `${this.getApiUrl()}/jobs/completed?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
 
     try {
       const response = await fetch(url, {
@@ -481,7 +503,7 @@ class AcpClient {
   }
 
   async getCancelledJobs(page: number = 1, pageSize: number = 10) {
-    let url = `${this.acpUrl}/api/jobs/cancelled?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
+    let url = `${this.getApiUrl()}/jobs/cancelled?pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
 
     try {
       const response = await fetch(url, {
@@ -523,8 +545,8 @@ class AcpClient {
   }
 
   async getJobById(jobId: number) {
-    let url = `${this.acpUrl}/api/jobs/${jobId}`;
-
+    let url = `${this.getApiUrl()}/jobs/${jobId}`;
+    
     try {
       const response = await fetch(url, {
         headers: {
@@ -569,7 +591,7 @@ class AcpClient {
   }
 
   async getMemoById(jobId: number, memoId: number) {
-    let url = `${this.acpUrl}/api/jobs/${jobId}/memos/${memoId}`;
+    let url = `${this.getApiUrl()}/jobs/${jobId}/memos/${memoId}`;
 
     try {
       const response = await fetch(url, {
@@ -603,7 +625,7 @@ class AcpClient {
   }
 
   async getAgent(walletAddress: Address) {
-    const url = `${this.acpUrl}/api/agents?filters[walletAddress]=${walletAddress}`;
+    const url = `${this.getApiUrl()}/agents?filters[walletAddress]=${walletAddress}`;
 
     const response = await fetch(url);
     const data: {

@@ -1,21 +1,17 @@
-import { Address, LocalAccountSigner, SmartAccountSigner } from "@aa-sdk/core";
-import { alchemy } from "@account-kit/infra";
-import {
-  ModularAccountV2Client,
-  createModularAccountV2Client,
-} from "@account-kit/smart-contracts";
-import { AcpContractConfig, baseAcpConfig } from "./configs";
-import ACP_ABI from "./acpAbi";
-import {
+import { 
+  Address, 
   createPublicClient,
   decodeEventLog,
   encodeFunctionData,
   erc20Abi,
   fromHex,
   http,
-  PublicClient,
+  Hash
 } from "viem";
 import { publicActionsL2 } from "viem/op-stack";
+import { AcpContractConfig, baseAcpConfig } from "./configs";
+import ACP_ABI from "./acpAbi";
+import { SessionSigner } from "./interfaces";
 
 export enum MemoType {
   MESSAGE,
@@ -49,90 +45,61 @@ export enum FeeType {
 class AcpContractClient {
   private MAX_RETRIES = 3;
 
-  private _sessionKeyClient: ModularAccountV2Client | undefined;
+  private publicClient: any;
+  private sessionSigner: SessionSigner;
   private chain;
   private contractAddress: Address;
   private virtualsTokenAddress: Address;
-  private customRpcClient: PublicClient;
 
   constructor(
-    private walletPrivateKey: Address,
-    private sessionEntityKeyId: number,
-    private agentWalletAddress: Address,
+    sessionSigner: SessionSigner,
     public config: AcpContractConfig = baseAcpConfig,
     public customRpcUrl?: string
   ) {
+    this.sessionSigner = sessionSigner;
     this.chain = config.chain;
     this.contractAddress = config.contractAddress;
     this.virtualsTokenAddress = config.virtualsTokenAddress;
-    this.customRpcUrl = customRpcUrl;
 
-    this.customRpcClient = createPublicClient({
+    // Create public client for reading blockchain data
+    this.publicClient = createPublicClient({
       chain: this.chain,
       transport: this.customRpcUrl ? http(this.customRpcUrl) : http(),
     }).extend(publicActionsL2());
   }
 
   static async build(
-    walletPrivateKey: Address,
-    sessionEntityKeyId: number,
-    agentWalletAddress: Address,
+    sessionSigner: SessionSigner,
     customRpcUrl?: string,
     config: AcpContractConfig = baseAcpConfig
   ) {
     const acpContractClient = new AcpContractClient(
-      walletPrivateKey,
-      sessionEntityKeyId,
-      agentWalletAddress,
+      sessionSigner,
       config,
       customRpcUrl
     );
 
     await acpContractClient.init();
-
     return acpContractClient;
   }
 
   async init() {
-    const sessionKeySigner: SmartAccountSigner =
-      LocalAccountSigner.privateKeyToAccountSigner(this.walletPrivateKey);
-
-    this._sessionKeyClient = await createModularAccountV2Client({
-      chain: this.chain,
-      transport: alchemy({
-        rpcUrl: this.config.alchemyRpcUrl,
-      }),
-      signer: sessionKeySigner,
-      policyId: "186aaa4a-5f57-4156-83fb-e456365a8820",
-      accountAddress: this.agentWalletAddress,
-      signerEntity: {
-        entityId: this.sessionEntityKeyId,
-        isGlobalValidation: true,
-      },
-    });
-  }
-
-  get sessionKeyClient() {
-    if (!this._sessionKeyClient) {
-      throw new Error("Session key client not initialized");
-    }
-
-    return this._sessionKeyClient;
+    // No initialization needed for SessionSigner
+    console.log('✅ AcpContractClient initialized with SessionSigner');
   }
 
   get walletAddress() {
-    return this.sessionKeyClient.account.address as Address;
+    return this.sessionSigner.address;
   }
 
   private async calculateGasFees() {
     const { maxFeePerGas, maxPriorityFeePerGas } =
-      await this.customRpcClient.estimateFeesPerGas();
+      await this.publicClient.estimateFeesPerGas();
 
     let finalMaxFeePerGas = maxFeePerGas;
     let priorityFeeMultiplier = Number(this.config.priorityFeeMultiplier) || 2;
 
     const overrideMaxFeePerGas = this.config.maxFeePerGas || maxFeePerGas;
-
     const overrideMaxPriorityFeePerGas =
       this.config.maxPriorityFeePerGas || maxPriorityFeePerGas;
 
@@ -144,71 +111,53 @@ class AcpContractClient {
     return finalMaxFeePerGas;
   }
 
-  private async handleSendUserOperation(
+  private async sendTransaction(
+    to: Address,
     data: `0x${string}`,
-    contractAddress: Address = this.contractAddress
-  ) {
-    const payload = {
-      uo: {
-        target: contractAddress,
-        data: data,
-      },
-      overrides: {},
-    };
+    value?: bigint
+  ): Promise<Hash> {
+    const maxFeePerGas = await this.calculateGasFees();
+    const gas = await this.publicClient.estimateGas({
+      account: this.sessionSigner.address,
+      to,
+      data,
+      value,
+      maxFeePerGas,
+    });
 
-    let retries = this.MAX_RETRIES;
-    let finalError: unknown;
+    const hash = await this.sessionSigner.sendTransaction({
+      to,
+      data,
+      value,
+      gas,
+      maxFeePerGas,
+      chain: this.chain,
+    });
 
-    while (retries > 0) {
-      try {
-        if (this.MAX_RETRIES > retries) {
-          const gasFees = await this.calculateGasFees();
+    const receipt = await this.publicClient.waitForTransactionReceipt({
+      hash,
+    });
 
-          payload["overrides"] = {
-            maxFeePerGas: `0x${gasFees.toString(16)}`,
-          };
-        }
-
-        const { hash } = await this.sessionKeyClient.sendUserOperation(payload);
-
-        await this.sessionKeyClient.waitForUserOperationTransaction({
-          hash,
-        });
-
-        return hash;
-      } catch (error) {
-        console.debug("Failed to send user operation", error);
-
-        retries -= 1;
-        if (retries === 0) {
-          finalError = error;
-          break;
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 2000 * retries));
-      }
+    if (receipt.status === 'success') {
+      return hash;
+    } else {
+      throw new Error('Transaction failed');
     }
-
-    throw new Error(`Failed to send user operation ${finalError}`);
   }
 
-  private async getJobId(hash: Address) {
-    const result = await this.sessionKeyClient.getUserOperationReceipt(hash);
 
-    if (!result) {
-      throw new Error("Failed to get user operation receipt");
-    }
+  private async getJobIdFromTx(hash: Hash): Promise<number> {
+    const receipt = await this.publicClient.getTransactionReceipt({ hash });
 
-    const contractLogs = result.logs.find(
-      (log: any) =>
-        log.address.toLowerCase() === this.contractAddress.toLowerCase()
-    ) as any;
+    const contractLog = receipt.logs.find(
+      (log: any) => log.address.toLowerCase() === this.contractAddress.toLowerCase()
+    );
 
-    if (!contractLogs) {
+    if (!contractLog) {
       throw new Error("Failed to get contract logs");
     }
 
-    return fromHex(contractLogs.data, "number");
+    return fromHex(contractLog.data, "number");
   }
 
   async createJob(
@@ -226,15 +175,13 @@ class AcpContractClient {
           Math.floor(expireAt.getTime() / 1000),
         ],
       });
+      
+      const hash = await this.sendTransaction(this.contractAddress, data);
+      const jobId = await this.getJobIdFromTx(hash);
 
-      const hash = await this.handleSendUserOperation(data);
-
-      const jobId = await this.getJobId(hash);
-
-      return { txHash: hash, jobId: jobId };
-    } catch (error) {
-      console.error(`Failed to create job ${error}`);
-      throw new Error("Failed to create job");
+      return { txHash: hash, jobId };
+    } catch (error: any) {
+      throw new Error(`Failed to create job: ${error.message || error}`);
     }
   }
 
@@ -246,12 +193,8 @@ class AcpContractClient {
         args: [this.contractAddress, priceInWei],
       });
 
-      return await this.handleSendUserOperation(
-        data,
-        this.virtualsTokenAddress
-      );
+      return await this.sendTransaction(this.virtualsTokenAddress, data);
     } catch (error) {
-      console.error(`Failed to approve allowance ${error}`);
       throw new Error("Failed to approve allowance");
     }
   }
@@ -263,37 +206,17 @@ class AcpContractClient {
     memoType: MemoType.PAYABLE_FEE | MemoType.PAYABLE_FEE_REQUEST,
     nextPhase: AcpJobPhases
   ) {
-    let retries = 3;
-    while (retries > 0) {
-      try {
-        const data = encodeFunctionData({
-          abi: ACP_ABI,
-          functionName: "createPayableFeeMemo",
-          args: [jobId, content, amount, memoType, nextPhase],
-        });
+    try {
+      const data = encodeFunctionData({
+        abi: ACP_ABI,
+        functionName: "createPayableFeeMemo",
+        args: [jobId, content, amount, memoType, nextPhase],
+      });
 
-        const { hash } = await this.sessionKeyClient.sendUserOperation({
-          uo: {
-            target: this.contractAddress,
-            data: data,
-          },
-        });
-
-        await this.sessionKeyClient.waitForUserOperationTransaction({
-          hash,
-        });
-
-        return hash;
-      } catch (error) {
-        console.error(
-          `failed to create payable fee memo ${jobId} ${content} ${error}`
-        );
-        retries -= 1;
-        await new Promise((resolve) => setTimeout(resolve, 2000 * retries));
-      }
+      return await this.sendTransaction(this.contractAddress, data);
+    } catch (error) {
+      throw new Error("Failed to create payable fee memo");
     }
-
-    throw new Error("Failed to create payable fee memo");
   }
 
   async createPayableMemo(
@@ -308,48 +231,28 @@ class AcpContractClient {
     expiredAt?: Date,
     token: Address = this.config.virtualsTokenAddress
   ) {
-    let retries = 3;
-    while (retries > 0) {
-      try {
-        const data = encodeFunctionData({
-          abi: ACP_ABI,
-          functionName: "createPayableMemo",
-          args: [
-            jobId,
-            content,
-            token,
-            amount,
-            recipient,
-            feeAmount,
-            feeType,
-            type,
-            nextPhase,
-            expiredAt ? Math.floor(expiredAt.getTime() / 1000) : 0,
-          ],
-        });
+    try {
+      const data = encodeFunctionData({
+        abi: ACP_ABI,
+        functionName: "createPayableMemo",
+        args: [
+          jobId,
+          content,
+          token,
+          amount,
+          recipient,
+          feeAmount,
+          feeType,
+          type,
+          nextPhase,
+          expiredAt ? Math.floor(expiredAt.getTime() / 1000) : 0,
+        ],
+      });
 
-        const { hash } = await this.sessionKeyClient.sendUserOperation({
-          uo: {
-            target: this.contractAddress,
-            data: data,
-          },
-        });
-
-        await this.sessionKeyClient.waitForUserOperationTransaction({
-          hash,
-        });
-
-        return hash;
-      } catch (error) {
-        console.error(
-          `failed to create payable memo ${jobId} ${content} ${error}`
-        );
-        retries -= 1;
-        await new Promise((resolve) => setTimeout(resolve, 2000 * retries));
-      }
+      return await this.sendTransaction(this.contractAddress, data);
+    } catch (error) {
+      throw new Error("Failed to create payable memo");
     }
-
-    throw new Error("Failed to create payable memo");
   }
 
   async createMemo(
@@ -366,33 +269,27 @@ class AcpContractClient {
         args: [jobId, content, type, isSecured, nextPhase],
       });
 
-      return await this.handleSendUserOperation(data);
+      return await this.sendTransaction(this.contractAddress, data);
     } catch (error) {
-      console.error(`Failed to create memo ${jobId} ${content} ${error}`);
       throw new Error("Failed to create memo");
     }
   }
 
-  async getMemoId(hash: Address) {
-    const result = await this.sessionKeyClient.getUserOperationReceipt(hash);
+  async getMemoId(hash: Hash): Promise<number> {
+    const receipt = await this.publicClient.getTransactionReceipt({ hash });
 
-    if (!result) {
-      throw new Error("Failed to get user operation receipt");
-    }
+    const contractLog = receipt.logs.find(
+      (log: any) => log.address.toLowerCase() === this.contractAddress.toLowerCase()
+    );
 
-    const contractLogs = result.logs.find(
-      (log: any) =>
-        log.address.toLowerCase() === this.contractAddress.toLowerCase()
-    ) as any;
-
-    if (!contractLogs) {
+    if (!contractLog) {
       throw new Error("Failed to get contract logs");
     }
 
     const decoded = decodeEventLog({
       abi: ACP_ABI,
-      data: contractLogs.data,
-      topics: contractLogs.topics,
+      data: contractLog.data,
+      topics: contractLog.topics,
     });
 
     if (!decoded.args) {
@@ -410,9 +307,8 @@ class AcpContractClient {
         args: [memoId, isApproved, reason],
       });
 
-      return await this.handleSendUserOperation(data);
+      return await this.sendTransaction(this.contractAddress, data);
     } catch (error) {
-      console.error(`Failed to sign memo ${error}`);
       throw new Error("Failed to sign memo");
     }
   }
@@ -425,11 +321,87 @@ class AcpContractClient {
         args: [jobId, budget],
       });
 
-      return await this.handleSendUserOperation(data);
+      return await this.sendTransaction(this.contractAddress, data);
     } catch (error) {
-      console.error(`Failed to set budget ${error}`);
       throw new Error("Failed to set budget");
     }
+  }
+
+  // Batch operations (useful with session signers)
+  async sendBatchTransactions(
+    transactions: Array<{
+      to: Address;
+      data: `0x${string}`;
+      value?: bigint;
+    }>
+  ): Promise<Hash[]> {
+    const hashes: Hash[] = [];
+    
+    for (const tx of transactions) {
+      try {
+        const hash = await this.sendTransaction(tx.to, tx.data, tx.value);
+        hashes.push(hash);
+      } catch (error) {
+        throw new Error(`Batch failed at transaction ${hashes.length + 1}: ${error}`);
+      }
+    }
+    
+    return hashes;
+  }
+
+  // Create multiple jobs in batch
+  async createMultipleJobs(
+    jobs: Array<{
+      providerAddress: string;
+      evaluatorAddress: string;
+      expireAt: Date;
+    }>
+  ): Promise<Array<{txHash: string; jobId: number}>> {
+    const transactions = jobs.map(job => ({
+      to: this.contractAddress as Address,
+      data: encodeFunctionData({
+        abi: ACP_ABI,
+        functionName: "createJob",
+        args: [
+          job.providerAddress,
+          job.evaluatorAddress,
+          Math.floor(job.expireAt.getTime() / 1000),
+        ],
+      }) as `0x${string}`
+    }));
+    
+    const hashes = await this.sendBatchTransactions(transactions);
+    
+    const results = await Promise.all(
+      hashes.map(async (hash) => {
+        const jobId = await this.getJobIdFromTx(hash);
+        return { txHash: hash, jobId };
+      })
+    );
+    
+    return results;
+  }
+
+  // Create multiple memos in batch
+  async createMultipleMemos(
+    memos: Array<{
+      jobId: number;
+      content: string;
+      type: MemoType;
+      isSecured: boolean;
+      nextPhase: AcpJobPhases;
+    }>
+  ): Promise<Hash[]> {
+    const transactions = memos.map(memo => ({
+      to: this.contractAddress as Address,
+      data: encodeFunctionData({
+        abi: ACP_ABI,
+        functionName: "createMemo",
+        args: [memo.jobId, memo.content, memo.type, memo.isSecured, memo.nextPhase],
+      }) as `0x${string}`
+    }));
+
+    return await this.sendBatchTransactions(transactions);
   }
 }
 

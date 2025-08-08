@@ -1,5 +1,5 @@
-import { Address } from "@aa-sdk/core";
-import { baseSepolia, base } from "@account-kit/infra";
+import { Address } from "viem";
+import { baseSepolia, base } from "viem/chains";
 
 type AcpContractConfig = {
   chain: typeof baseSepolia | typeof base;
@@ -34,4 +34,5 @@ const baseAcpConfig: AcpContractConfig = {
   maxPriorityFeePerGas: 21000000,
 };
 
-export { AcpContractConfig, baseSepoliaAcpConfig, baseAcpConfig };
+export type { AcpContractConfig };
+export { baseSepoliaAcpConfig, baseAcpConfig };

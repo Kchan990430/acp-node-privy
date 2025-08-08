@@ -1,4 +1,4 @@
-import { Address } from "viem";
+import { Address, Hash } from "viem";
 import AcpContractClient, { AcpJobPhases, MemoType } from "./acpContractClient";
 import AcpJob from "./acpJob";
 import acpMemo from "./acpMemo";
@@ -188,3 +188,22 @@ export type CloseJobAndWithdrawPayload = {
 export type RequestClosePositionPayload = {
   positionId: number;
 };
+
+export interface WalletProvider {
+  address: Address;
+  getEthereumProvider: () => Promise<any>;
+}
+
+export type PrivyChainType = 
+  | 'ethereum' 
+  | 'solana' 
+  | 'bitcoin-segwit' 
+  | 'polygon'
+  | string;
+
+export interface SessionSigner {
+  signerId: string;
+  address: Address;
+  signTransaction: (tx: any) => Promise<string>;
+  sendTransaction: (tx: any) => Promise<Hash>;
+}
