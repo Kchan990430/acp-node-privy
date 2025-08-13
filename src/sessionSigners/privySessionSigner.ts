@@ -7,6 +7,7 @@ export interface PrivySessionSignerConfig {
   privyAppId: string;
   privyAppSecret: string;
   sessionSignerPrivateKey: string; // Private key for backend control (PEM or wallet-auth:BASE64 format)
+  keyQuorumId?: string; // Optional: Key quorum ID if using key quorum approach
   chainId?: number; // Default to Base Sepolia (84532)
 }
 
@@ -20,6 +21,7 @@ export class PrivySessionSigner implements SessionSigner {
   private readonly chainId: number;
   private readonly caip2: string;
   private privyClient: any; // Will be initialized dynamically
+  private privateKey?: string; // Store private key if updateAuthorizationKey not available
   
   constructor(private config: PrivySessionSignerConfig) {
     this.signerId = config.walletId;
@@ -35,19 +37,42 @@ export class PrivySessionSigner implements SessionSigner {
     try {
       // Dynamic import to avoid build-time issues
       const { PrivyClient } = await import('@privy-io/server-auth');
+      
+      // Extract private key first
+      const privateKey = this.extractPrivateKey(this.config.sessionSignerPrivateKey);
+      
+      // Initialize PrivyClient with walletApi configuration
       this.privyClient = new PrivyClient(
         this.config.privyAppId,
-        this.config.privyAppSecret, 
-        { 
+        this.config.privyAppSecret,
+        {
           walletApi: {
-            authorizationPrivateKey: this.extractPrivateKey(this.config.sessionSignerPrivateKey)
+            // Pass the authorization private key during initialization
+            authorizationPrivateKey: privateKey || undefined
           }
         }
       );
+      
+      console.log('✅ PrivyClient initialized with configuration');
+      console.log('WalletApi available:', !!this.privyClient.walletApi);
+      
+      // Log available properties on privyClient
+      if (this.privyClient.walletApi) {
+        console.log('✅ WalletApi is available');
+        console.log('WalletApi.ethereum available:', !!this.privyClient.walletApi.ethereum);
+        console.log('WalletApi.solana available:', !!this.privyClient.walletApi.solana);
+        
+        // Check if updateAuthorizationKey exists
+        if (typeof this.privyClient.walletApi.updateAuthorizationKey === 'function') {
+          console.log('✅ updateAuthorizationKey method is available');
+        }
+      } else {
+        console.log('⚠️ WalletApi not initialized');
+        this.privateKey = privateKey; // Store for fallback
+      }
     } catch (error) {
       console.error('Failed to initialize PrivyClient:', error);
-      // Fallback to direct API calls if PrivyClient fails to load
-      this.privyClient = null;
+      throw error; // Don't continue if initialization fails
     }
   }
   
@@ -69,130 +94,148 @@ export class PrivySessionSigner implements SessionSigner {
    * Sign transaction using PrivyClient
    * Note: Privy may not support eth_signTransaction directly, we'll use sendTransaction instead
    */
-  async signTransaction(tx: any): Promise<string> {
+  async signTransaction(_tx: any): Promise<string> {
     // For now, we'll throw an error as Privy doesn't expose signing without sending
     // The ACP SDK should use sendTransaction directly
     throw new Error('PrivySessionSigner does not support signing without sending. Use sendTransaction instead.');
   }
 
   /**
-   * Send transaction using PrivyClient or fallback to direct API
-   * PrivyClient handles authorization automatically with sessionSignerPrivateKey
+   * Send transaction using PrivyClient with session signer
+   * Following Privy's example with updateAuthorizationKey and sendTransaction
    */
   async sendTransaction(tx: any): Promise<Hash> {
-    // Wait for PrivyClient to be initialized
+    // Ensure PrivyClient is initialized
     if (!this.privyClient) {
       await this.initPrivyClient();
     }
     
-    // If PrivyClient is available, use it
-    if (this.privyClient) {
-      try {
-        console.log('Sending transaction via PrivyClient:', {
-          walletId: this.signerId,
-          walletAddress: this.address,
-          to: tx.to,
-          value: tx.value,
-          chainId: this.chainId
-        });
+    try {
+      console.log('Sending transaction via Privy SDK with session signer:', {
+        walletId: this.signerId,
+        to: tx.to,
+        value: tx.value?.toString(),
+        chainId: this.chainId
+      });
 
-        const result = await this.privyClient.walletApi.rpc({
-          walletId: this.signerId,
-          method: 'eth_sendTransaction',
-          params: {
-            transaction: {
-              to: tx.to,
-              value: `0x${(BigInt(tx.value || 0)).toString(16)}`,
-              ...(tx.data && tx.data !== '0x' ? { data: tx.data } : {}),
-              ...(tx.gas && { gas: `0x${(BigInt(tx.gas)).toString(16)}` }),
-              ...(tx.maxFeePerGas && { maxFeePerGas: `0x${(BigInt(tx.maxFeePerGas)).toString(16)}` }),
-              ...(tx.maxPriorityFeePerGas && { maxPriorityFeePerGas: `0x${(BigInt(tx.maxPriorityFeePerGas)).toString(16)}` })
-            }
-          },
-          caip2: this.caip2 as `eip155:${string}`
-        });
-
-        // Handle different response formats
-        const txHash = (result as any).hash || (result as any).data?.hash || (result as any).data?.txHash || (result as any).result || result;
-        
-        if (!txHash) {
-          throw new Error('Transaction hash not found in Privy response');
-        }
-        
-        console.log('Transaction sent successfully:', txHash);
-        return txHash as Hash;
-      } catch (error: any) {
-        if (error.message?.includes('authorization')) {
-          throw new Error(`Authorization failed. Ensure:
-1. Authorization key is registered in Privy Dashboard
-2. Key is linked to this wallet
-3. Private key matches the registered public key
-Error: ${error.message}`);
-        }
-        throw new Error(`Privy transaction failed: ${error.message || error}`);
+      // Check if walletApi and ethereum are available
+      if (!this.privyClient.walletApi) {
+        throw new Error('WalletApi not available on PrivyClient');
       }
+      
+      if (!this.privyClient.walletApi.ethereum) {
+        throw new Error('Ethereum RPC API not available on WalletApi');
+      }
+
+      // Use the correct walletApi.ethereum.sendTransaction method
+      // Convert value to hex string to avoid BigInt serialization issues
+      const valueHex = tx.value ? `0x${BigInt(tx.value).toString(16)}` : '0x0';
+      
+      const result = await this.privyClient.walletApi.ethereum.sendTransaction({
+        walletId: this.signerId,
+        transaction: {
+          to: tx.to,
+          value: valueHex, // Use hex string format
+          ...(tx.data && tx.data !== '0x' ? { data: tx.data } : {})
+        },
+        caip2: this.caip2 as `eip155:${string}`
+      });
+
+      // Extract transaction hash from result
+      const txHash = result.hash;
+      
+      console.log('Transaction sent successfully via session signer:', txHash);
+      return txHash as Hash;
+      
+    } catch (error: any) {
+      console.error('Privy SDK transaction failed:', error);
+      // Fallback to direct API if SDK fails
+      console.log('Falling back to direct API...');
+      return this.sendTransactionDirectAPI(tx);
     }
-    
-    // Fallback to direct API if PrivyClient is not available
-    return this.sendTransactionDirectAPI(tx);
   }
   
   /**
-   * Fallback method using direct Privy API
+   * Direct API method using Privy's wallet RPC endpoint with session signer
    */
   private async sendTransactionDirectAPI(tx: any): Promise<Hash> {
-    const basicAuth = Buffer.from(`${this.config.privyAppId}:${this.config.privyAppSecret}`).toString('base64');
     const apiUrl = 'https://api.privy.io/v1';
     
-    const requestBody = JSON.stringify({
+    // Construct the RPC request body according to Privy's format
+    // Based on the documentation, eth_sendTransaction expects this format
+    const requestBody = {
       method: 'eth_sendTransaction',
       caip2: this.caip2,
       chain_type: 'ethereum',
+      wallet_id: this.signerId,
       params: {
         transaction: {
           to: tx.to,
-          value: `0x${(BigInt(tx.value || 0)).toString(16)}`,
+          value: tx.value ? `0x${(BigInt(tx.value)).toString(16)}` : '0x0',
           ...(tx.data && tx.data !== '0x' ? { data: tx.data } : {})
         }
       }
-    });
-    
-    const headers: any = {
-      'Authorization': `Basic ${basicAuth}`,
-      'Content-Type': 'application/json',
-      'privy-app-id': this.config.privyAppId,
     };
     
-    // Generate and add authorization signature
+    // Try different endpoint formats that might work with current Privy API
+    const url = `${apiUrl}/rpc`;
+    const method = 'POST';
+    
+    console.log('Sending transaction via Privy RPC:', {
+      walletId: this.signerId,
+      from: this.address,
+      to: tx.to,
+      value: tx.value?.toString()
+    });
+    
+    // Generate authorization signature for the request
     const authSignature = this.generateAuthorizationSignature(
-      'POST', 
-      `${apiUrl}/wallets/${this.signerId}/rpc`, 
-      requestBody
+      method,
+      url,
+      JSON.stringify(requestBody)
     );
     
+    // Try different authentication formats based on Privy's current API
+    const headers: any = {
+      'Content-Type': 'application/json',
+      'privy-app-id': this.config.privyAppId,
+      'privy-app-secret': this.config.privyAppSecret,
+    };
+    
+    // Add authorization signature if we have a key quorum configured
     if (authSignature) {
       headers['privy-authorization-signature'] = authSignature;
+      console.log('Authorization signature added for session signer');
     }
     
-    const response = await fetch(`${apiUrl}/wallets/${this.signerId}/rpc`, {
-      method: 'POST',
+    const response = await fetch(url, {
+      method,
       headers,
-      body: requestBody
+      body: JSON.stringify(requestBody)
     });
 
+    const responseText = await response.text();
+    
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Privy transaction failed: ${error}`);
+      console.error('Privy RPC error:', responseText);
+      throw new Error(`Privy transaction failed: ${responseText}`);
     }
 
-    const result = await response.json();
-    const txHash = result.hash || result.data?.hash || result.data?.txHash || result.result;
-    
-    if (!txHash) {
-      throw new Error('Transaction hash not found in Privy response');
+    try {
+      const result = JSON.parse(responseText);
+      const txHash = result.result || result.hash || result.data?.hash || result.data?.txHash;
+      
+      if (!txHash) {
+        console.error('Unexpected response format:', result);
+        throw new Error('Transaction hash not found in Privy response');
+      }
+      
+      console.log('Transaction sent successfully:', txHash);
+      return txHash as Hash;
+    } catch (error) {
+      console.error('Failed to parse response:', responseText);
+      throw new Error('Invalid response from Privy API');
     }
-    
-    return txHash as Hash;
   }
   
   /**
@@ -276,33 +319,150 @@ Error: ${error.message}`);
   }
 
   /**
-   * Create a new Privy agent wallet (static method)
+   * Create a new Privy agent wallet with optional key quorum (static method)
    */
   static async createAgentWallet(
     privyAppId: string,
     privyAppSecret: string,
-    chainType: string = 'ethereum'
+    chainType: 'ethereum' | 'solana' = 'ethereum',
+    keyQuorumId?: string,
+    userId?: string
   ): Promise<{ walletId: string; address: Address }> {
-    const response = await fetch('https://api.privy.io/v1/wallets', {
+    try {
+      // Dynamic import to use PrivyClient
+      const { PrivyClient } = await import('@privy-io/server-auth');
+      const privy = new PrivyClient(privyAppId, privyAppSecret);
+      
+      // Create wallet first, optionally linked to user
+      const walletConfig: any = {
+        chainType: chainType as any
+      };
+      
+      // Link to user if userId provided
+      if (userId) {
+        walletConfig.linkedTo = userId;
+        walletConfig.createAdditional = true; // Allow creating additional wallets for the user
+        console.log('Creating additional wallet linked to user:', userId);
+      }
+      
+      const wallet = await privy.walletApi.createWallet(walletConfig);
+      console.log('Created wallet:', wallet.id, userId ? `(linked to user ${userId})` : '(no user)');
+      
+      // Then update it to add the key quorum if provided (following Privy's example)
+      if (keyQuorumId) {
+        console.log('Updating wallet to add key quorum:', keyQuorumId);
+        await privy.walletApi.updateWallet({
+          id: wallet.id,
+          additionalSigners: [{
+            signerId: keyQuorumId
+          }]
+        });
+        console.log('Key quorum added to wallet');
+      }
+      
+      return {
+        walletId: wallet.id,
+        address: wallet.address as Address,
+      };
+    } catch (error: any) {
+      // Fallback to direct API call
+      const response = await fetch('https://api.privy.io/v1/wallets', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${Buffer.from(`${privyAppId}:${privyAppSecret}`).toString('base64')}`,
+          'privy-app-id': privyAppId,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          chain_type: chainType
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Failed to create agent wallet: ${error}`);
+      }
+
+      const result = await response.json();
+      
+      // If key quorum is provided, update the wallet
+      if (keyQuorumId) {
+        await PrivySessionSigner.updateWallet(
+          result.id,
+          keyQuorumId,
+          privyAppId,
+          privyAppSecret
+        );
+      }
+      
+      return {
+        walletId: result.id,
+        address: result.address as Address,
+      };
+    }
+  }
+
+  /**
+   * Update wallet to add key quorum as additional signer (static method)
+   * Uses PATCH endpoint per Privy's new approach
+   */
+  static async updateWallet(
+    walletId: string,
+    keyQuorumId: string,
+    privyAppId: string,
+    privyAppSecret: string
+  ): Promise<void> {
+    // Use direct API call for PATCH operation
+    const response = await fetch(`https://api.privy.io/v1/wallets/${walletId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Basic ${Buffer.from(`${privyAppId}:${privyAppSecret}`).toString('base64')}`,
+        'privy-app-id': privyAppId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        additional_signers: [keyQuorumId]
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to update wallet with key quorum: ${error}`);
+    }
+    
+    console.log(`✅ Wallet ${walletId} updated with key quorum ${keyQuorumId}`);
+  }
+
+  /**
+   * Create a key quorum for authorization (static method)
+   * Key quorums allow backend authorization without user interaction
+   */
+  static async createKeyQuorum(
+    publicKey: string,
+    privyAppId: string,
+    privyAppSecret: string,
+    threshold: number = 1
+  ): Promise<string> {
+    const response = await fetch('https://api.privy.io/v1/key_quorums', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${Buffer.from(`${privyAppId}:${privyAppSecret}`).toString('base64')}`,
         'privy-app-id': privyAppId,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ chain_type: chainType })
+      body: JSON.stringify({
+        public_keys: [publicKey],
+        threshold
+      })
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Failed to create agent wallet: ${error}`);
+      throw new Error(`Failed to create key quorum: ${error}`);
     }
 
     const result = await response.json();
-    return {
-      walletId: result.id,
-      address: result.address as Address,
-    };
+    return result.id;
   }
 
   /**

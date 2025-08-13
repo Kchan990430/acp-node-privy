@@ -24,11 +24,12 @@ import {
 } from "./configs";
 import { PrivySessionSigner } from "./sessionSigners/privySessionSigner";
 import {
-  transferFunds,
-  getBalance,
-  approveTokenSpending,
-  transferAllBalance
-} from "./utils/fundTransfer";
+  PrivyAuthKeyManager,
+  WalletAuthStore,
+  type AuthorizationKey,
+  type KeyQuorum,
+  type WalletAuthConfig
+} from "./utils/authKeyManager";
 
 export default AcpClient;
 
@@ -48,6 +49,10 @@ export type {
   WalletProvider,
   SessionSigner,
   PrivyChainType,
+  // Per-wallet Auth types
+  AuthorizationKey,
+  KeyQuorum,
+  WalletAuthConfig,
 };
 
 // Export values
@@ -63,9 +68,7 @@ export {
   ACP_ABI,
   // Session Signers
   PrivySessionSigner,
-  // Utilities
-  transferFunds,
-  getBalance,
-  approveTokenSpending,
-  transferAllBalance,
+  // Per-wallet Auth Management
+  PrivyAuthKeyManager,
+  WalletAuthStore,
 };
