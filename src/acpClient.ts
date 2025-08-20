@@ -4,7 +4,7 @@ import AcpContractClient, {
   AcpJobPhases,
   FeeType,
   MemoType,
-} from "./acpContractClient";
+} from "./acpContractClientV2";
 import AcpJob from "./acpJob";
 import AcpMemo from "./acpMemo";
 import AcpJobOffering from "./acpJobOffering";

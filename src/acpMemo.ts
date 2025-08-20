@@ -1,5 +1,5 @@
 import AcpClient from "./acpClient";
-import { AcpJobPhases, MemoType } from "./acpContractClient";
+import { AcpJobPhases, MemoType } from "./acpContractClientV2";
 import { GenericPayload, PayloadType } from "./interfaces";
 import { tryParseJson } from "./utils";
 

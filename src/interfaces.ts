@@ -1,5 +1,5 @@
 import { Address, Hash } from "viem";
-import AcpContractClient, { AcpJobPhases, MemoType } from "./acpContractClient";
+import AcpContractClient, { AcpJobPhases, MemoType } from "./acpContractClientV2";
 import AcpJob from "./acpJob";
 import acpMemo from "./acpMemo";
 
@@ -204,6 +204,5 @@ export type PrivyChainType =
 export interface SessionSigner {
   signerId: string;
   address: Address;
-  signTransaction: (tx: any) => Promise<string>;
   sendTransaction: (tx: any) => Promise<Hash>;
 }

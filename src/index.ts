@@ -1,6 +1,6 @@
 import ACP_ABI from "./acpAbi";
 import AcpClient from "./acpClient";
-import AcpContractClient, { AcpJobPhases, MemoType, FeeType } from "./acpContractClient";
+import AcpContractClient, { AcpJobPhases, MemoType, FeeType } from "./acpContractClientV2";
 import AcpJob from "./acpJob";
 import AcpMemo from "./acpMemo";
 import {

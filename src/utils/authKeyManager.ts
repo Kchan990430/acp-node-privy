@@ -21,16 +21,10 @@ export interface WalletAuthConfig {
   walletAddress: string;
   keyQuorumId: string;
   authKeyId: string;
-  privateKey: string;
-  privateKeyBase64: string;
   publicKey: string;
   createdAt: Date;
 }
 
-/**
- * Manages per-wallet Authorization Keys for Privy wallets
- * Each wallet gets its own unique P-256 key pair - never reused across wallets
- */
 export class PrivyAuthKeyManager {
   private privyAppId: string;
   private privyAppSecret: string;
@@ -41,10 +35,6 @@ export class PrivyAuthKeyManager {
     this.privyAppSecret = appSecret;
   }
 
-  /**
-   * Generate a new P-256 key pair for a specific wallet
-   * Each wallet gets its own unique key - never shared
-   */
   async generateWalletAuthKey(): Promise<AuthorizationKey> {
     const { privateKey, publicKey } = await generateKeyPair('ec', {
       namedCurve: 'prime256v1',
@@ -141,6 +131,7 @@ export class PrivyAuthKeyManager {
 
   /**
    * Add Key Quorum as Session Signer to wallet
+   * Uses PATCH to update wallet with additional_signers
    */
   async addSessionSignerToWallet(
     walletId: string,
@@ -148,23 +139,34 @@ export class PrivyAuthKeyManager {
   ): Promise<void> {
     const basicAuth = this.getBasicAuth();
     
-    const response = await fetch(`${this.apiUrl}/wallets/${walletId}/signers`, {
-      method: 'POST',
+    // Use PATCH to update wallet with additional signers
+    const response = await fetch(`${this.apiUrl}/wallets/${walletId}`, {
+      method: 'PATCH',
       headers: {
         'Authorization': `Basic ${basicAuth}`,
         'Content-Type': 'application/json',
         'privy-app-id': this.privyAppId
       },
       body: JSON.stringify({
-        signer_id: keyQuorumId,
-        type: 'key_quorum'
+        additional_signers: [{ signer_id: keyQuorumId }]
       })
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to add session signer: ${error}`);
+      const errorText = await response.text();
+      let errorMessage = `Failed to add session signer: ${response.status} ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = `Failed to add session signer: ${errorJson.error || errorJson.message || errorText}`;
+      } catch {
+        if (errorText) {
+          errorMessage = `Failed to add session signer: ${errorText}`;
+        }
+      }
+      throw new Error(errorMessage);
     }
+    
+    console.log(`✅ Added key quorum ${keyQuorumId} as session signer to wallet ${walletId}`);
   }
 
   /**
@@ -247,8 +249,7 @@ export class PrivyAuthKeyManager {
       walletAddress,
       keyQuorumId,
       authKeyId: '', // No longer using authorization key API
-      privateKey: authKey.privateKey,
-      privateKeyBase64: authKey.privateKeyBase64,
+      // Private keys are not stored for security
       publicKey: authKey.publicKey,
       createdAt: new Date()
     };
@@ -360,13 +361,22 @@ export class PrivyAuthKeyManager {
 }
 
 /**
- * In-memory store for wallet auth configs (use database in production)
+ * In-memory store for wallet PUBLIC auth configs only
+ * Private keys are NEVER stored - must be provided per request
  */
 export class WalletAuthStore {
   private static store = new Map<string, WalletAuthConfig>();
 
   static save(walletId: string, config: WalletAuthConfig): void {
-    this.store.set(walletId, config);
+    // Ensure we never save private keys
+    const safeConfig = {
+      ...config,
+      privateKey: undefined,
+      privateKeyBase64: undefined
+    };
+    delete (safeConfig as any).privateKey;
+    delete (safeConfig as any).privateKeyBase64;
+    this.store.set(walletId, safeConfig);
   }
 
   static get(walletId: string): WalletAuthConfig | undefined {

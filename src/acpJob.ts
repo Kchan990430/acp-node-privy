@@ -1,6 +1,6 @@
 import { Address } from "viem";
 import AcpClient from "./acpClient";
-import { AcpJobPhases, FeeType, MemoType } from "./acpContractClient";
+import { AcpJobPhases, FeeType, MemoType } from "./acpContractClientV2";
 import AcpMemo from "./acpMemo";
 import {
   CloseJobAndWithdrawPayload,
